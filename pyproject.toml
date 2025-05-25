@@ -1,0 +1,21 @@
+[project]
+name = "agentpy"
+version = "0.1.0"
+description = "A one-file agent framework"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "invariant-sdk>=0.0.11",
+    "litellm>=1.71.1",
+    "rich-cli>=1.8.0",
+]
+
+[project.scripts]
+agentpy = "agentpy.cli_agent:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentpy"]
