@@ -1,6 +1,6 @@
 import os
 import asyncio
-from agentpy.agent import Agent, onstartup, auto, tool
+from agentpy.agent import Agent, context, auto, tool
 
 @tool
 def read_file(file_path: str) -> str:
@@ -11,16 +11,6 @@ def read_file(file_path: str) -> str:
         return f"Error: '{file_path}' is not a valid file."
     with open(file_path, 'r') as f:
         return f.read()
-
-@tool
-def write_file(file_path: str, content: str) -> str:
-    """Writes content to a file."""
-    try:
-        with open(file_path, 'w') as f:
-            f.write(content)
-        return f"Successfully wrote to '{file_path}'"
-    except Exception as e:
-        return f"Error writing to '{file_path}': {str(e)}"
 
 @tool
 def list_directory(path: str = ".") -> str:
@@ -42,12 +32,12 @@ def list_directory(path: str = ".") -> str:
     except Exception as e:
         return f"Error listing directory '{path}': {str(e)}"
 
-@onstartup
+@context
 async def pwd():
     """Get the current working directory."""
     return {"name": os.getcwd(), "type": "directory"}
 
-@onstartup
+@context
 async def cwd():
     """Get the contents of the current working directory."""
     return [{"name": f, "type": "file" if os.path.isfile(f) else "directory"} for f in os.listdir(os.getcwd())]
@@ -55,7 +45,7 @@ async def cwd():
 async def amain():
     agent = Agent(
         "You are a helpful assistant with access to file system tools. You can read files, write files, and list directories. When using tools, explain what you're doing step by step.",
-        model="gpt-4o", 
+        model="gpt-4o",
         tools=auto()
     )
     await agent.cli(persistent=False)

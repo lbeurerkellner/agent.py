@@ -4,11 +4,9 @@ import inspect
 import rich
 import os
 import asyncio
-from rich.markdown import Markdown
 import sys
 import json
 import types
-from rich.markdown import Markdown
 
 from collections import OrderedDict
 
@@ -83,9 +81,23 @@ class TerminalLogger:
         print()  # New line after streaming completes
 
 class Agent:
-    def __init__(self, instructions: str, model: str = "gpt-4o", tools: list[Callable] = None):
+    def __init__(self, instructions: str, model: str = "gpt-4o", tools: list[Callable] = None, model_config: dict = None, invariant_project_name: str = None):
         self.instructions = instructions
         self.model = model
+        self.model_config = model_config if model_config else {}
+
+        # check whether to use Invariant Gateway
+        invariant_project = invariant_project_name or os.getenv('INVARIANT_PROJECT')
+        if invariant_project:
+            self.invariant_project = invariant_project
+            endpoint_type = self.model_config.get('endpoint_type', 'openai')
+            self.model_config = self.model_config or {}
+            self.model_config['base_url'] = f"https://explorer.invariantlabs.ai/api/v1/gateway/{self.invariant_project}/" + endpoint_type
+            self.model_config['headers'] = self.model_config.get('headers', {})
+            if not "INVARIANT_API_KEY" in os.environ:
+                raise ValueError("INVARIANT_API_KEY environment variable is not set. Please set it to use Invariant.")
+            self.model_config['extra_headers'] = {"Invariant-Authorization": f"Bearer {os.getenv('INVARIANT_API_KEY')}"}
+
         if tools:
             assert all(callable(tool) for tool in tools), "All tools must be callable functions."
             tools = [to_tool(tool) for tool in tools]
@@ -162,7 +174,7 @@ class AgentInstance:
                 json.dump(self.history, f, indent=2)
 
     async def run_startup_tools(self):
-        startup_tools = [t for t in self.agent.tools.values() if t['callable'] in onstartup.__all__]
+        startup_tools = [t for t in self.agent.tools.values() if t['callable'] in context.__all__]
         startup_tool_results = await asyncio.gather(
             *(tool['callable']() for tool in startup_tools)
         )
@@ -170,7 +182,7 @@ class AgentInstance:
         for tool, result in zip(startup_tools, startup_tool_results):
             await self.append({
                 "role": "user",
-                "content": "Current output of '" + tool['function']['name'] + "' if relevant in the user query below. " + str(result)
+                "content": "Output of context value '" + tool['function']['name'] + "' if relevant in the user query below.\n\n" + str(result)
             })
     
     async def run(self, input: str):
@@ -198,6 +210,7 @@ class AgentInstance:
                 messages=self.history,
                 tools=self.tools(),
                 stream=True,
+                **self.agent.model_config
             )
             
             # collect content and tool calls from stream
@@ -315,19 +328,19 @@ class AgentInstance:
 
         return response
 
-def onstartup(func):
+def context(func):
     """Decorator to mark a function as a startup tool, to be included in the agent's context on startup."""
     import inspect
     # ensure the function can be called without arguments
     if not inspect.isfunction(func) or len(inspect.signature(func).parameters) != 0:
-        raise ValueError("onstartup functions must be callable without arguments.")
+        raise ValueError("context functions must be callable without arguments.")
     # ensure the function is async
     if not inspect.iscoroutinefunction(func):
-        raise ValueError("onstartup functions must be async functions.")
+        raise ValueError("context functions must be async functions.")
 
-    onstartup.__all__.append(func)
+    context.__all__.append(func)
     return func
-onstartup.__all__ = []
+context.__all__ = []
 
 def tool(func):
     """Decorator to mark a function as a tool, to be included in the agent's tools."""
@@ -349,8 +362,8 @@ def auto():
     functions = []
     for name, obj in vars(module).items():
         if isinstance(obj, types.FunctionType) and obj.__module__ == module.__name__:
-            if obj in tool.__all__ or obj in onstartup.__all__:
-                # If the function is decorated with @tool or @onstartup, include it
+            if obj in tool.__all__ or obj in context.__all__:
+                # If the function is decorated with @tool or @context, include it
                 functions.append(obj)
 
     return functions
