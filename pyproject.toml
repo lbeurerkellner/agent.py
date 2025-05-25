@@ -5,8 +5,10 @@ description = "A one-file agent framework"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aioconsole>=0.8.1",
     "invariant-sdk>=0.0.11",
     "litellm>=1.71.1",
+    "mcp>=1.9.1",
     "rich-cli>=1.8.0",
 ]
 

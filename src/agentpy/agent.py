@@ -2,15 +2,22 @@ from litellm import acompletion
 from typing import Callable, List
 import inspect
 import rich
+import tempfile
 import os
 import asyncio
 import sys
 import json
 import types
+import textwrap
+import aioconsole
+import io
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 from collections import OrderedDict
 
-def to_tool(callable: Callable) -> dict:
+def callable_to_tool(callable: Callable) -> dict:
     """Convert a Python callable to a tool definition."""
     signature = inspect.signature(callable)
     parameters = {
@@ -33,9 +40,129 @@ def to_tool(callable: Callable) -> dict:
         "callable": callable
     }
 
+def mcp_to_tool(mcp: 'MCP') -> dict:
+    """Convert an MCP instance to a tool definition."""
+    return {
+        "type": "mcp-server",
+        "function": {
+            "name": mcp.name,
+        },
+        "mcp": mcp
+    }
+
+def to_tool(tool: Callable | 'MCP') -> dict:
+    """Convert a callable or MCP instance to a tool definition."""
+    if isinstance(tool, MCP):
+        return mcp_to_tool(tool)
+    elif callable(tool):
+        return callable_to_tool(tool)
+    else:
+        raise ValueError("Tool must be a callable or an instance of MCP.")
+
+class MCP:
+    def __init__(self, name: str, command: str, args: list[str], env: dict | None = None, timeout: int = 4, transport: str = "stdio"):
+        if transport != "stdio":
+            raise ValueError("Only 'stdio' transport is currently supported in this example.")
+        self.name = name
+        self.server_params = StdioServerParameters(command=command, args=args, env=env)
+        self.transport = transport
+        self.timeout = timeout
+
+        self._client_context = None
+        self._client = None
+        self.session = None
+        self.tools = None  # will be initialized after the client context is created
+
+        self.ready = asyncio.Event()
+        self._terminate_event = asyncio.Event()
+        self._background_task = None
+
+    async def call_tool(self, tool_name: str, args: str):
+        """Calls a tool on the MCP server."""
+        if not self.session:
+            raise RuntimeError("MCP server is not initialized. Call 'initialize' first.")
+        try:
+            response = await self.session.call_tool(tool_name, args)
+            return "\n".join([content.model_dump_json() for content in response.content])
+        except Exception as e:
+            print(f"Error calling tool '{tool_name}' on MCP server '{self.name}': {str(e)}", flush=True)
+            return None
+
+    async def initialize(self):
+        """Starts the background task to manage the client/session lifecycle."""
+        if self._background_task is None or self._background_task.done():
+            self._terminate_event.clear()
+            self._background_task = asyncio.create_task(self._background_lifecycle())
+        await self.ready.wait()
+
+    async def terminate(self):
+        """Signals the background task to close the client/session."""
+        self._terminate_event.set()
+        if self._background_task:
+            await self._background_task
+
+    async def _background_lifecycle(self):
+        with tempfile.NamedTemporaryFile(delete=True) as error_log:
+            try:
+                self._client_context = stdio_client(self.server_params, errlog=error_log)
+                self._client = self._client_context.__aenter__()
+                read, write = await self._client
+                self.session = ClientSession(read, write, sampling_callback=None)
+                await self.session.__aenter__()
+
+                # initialize the session
+                await asyncio.wait_for(self.session.initialize(), timeout=self.timeout)
+                # query tools
+                tools = await self.session.list_tools()
+
+                # convert to model format            
+                self.tools = OrderedDict()
+                for tool in tools.tools:
+                    tool_def = {
+                        "type": "function",
+                        "function": {
+                            "name": "mcp_" + self.name + "_" + tool.name,
+                            "description": tool.description,
+                            "parameters": tool.inputSchema
+                        },
+                        "mcp": self
+                    }
+                    self.tools[tool_def['function']['name']] = tool_def
+
+                self.ready.set()
+
+                # Wait for terminate signal
+                await self._terminate_event.wait()
+
+            except Exception as e:
+                with open(error_log.name, 'r') as f:
+                    error_content = f.read()
+                print(f"Failed to initialize MCP server '{self.name}': {str(e)}\nServer Output:\n{error_content}", flush=True)
+                import traceback
+                traceback.print_exc()
+                self.ready.set()
+            finally:
+                await self._cleanup()
+
+    async def _cleanup(self):
+        if self.session:
+            await self.session.__aexit__(None, None, None)
+            self.session = None
+        if self._client_context:
+            await self._client_context.__aexit__(None, None, None)
+            self._client_context = None
+        self.tools = None
+        self.ready.clear()
+
+    async def close(self):
+        """Alias for terminate, for compatibility."""
+        await self.terminate()
+
+
 class TerminalLogger:
     def __init__(self):
         self.in_content = False
+        self.num_content_chunks = 0
 
     def reasoning(self, message: str):
         """Logs reasoning messages to the terminal."""
@@ -44,12 +171,15 @@ class TerminalLogger:
     def tool_call(self, tool_name: str, args: str):
         """Logs tool call messages to the terminal."""
         if self.in_content:
+            if self.num_content_chunks == 0:
+                print("[no reasoning output]", end="", flush=True)
             # if we are in content, we need to flush the current line
             print("\n")
         
         rich.print("> " + tool_name + "(" + args + ")")
         
         self.in_content = False
+        self.num_content_chunks = 0
     
     def tool_response(self, tool_name: str, response: str):
         """Logs tool response messages to the terminal."""
@@ -57,14 +187,15 @@ class TerminalLogger:
         # render at most 4 lines of the response
         response_lines = response.splitlines()
         if len(response_lines) > 4:
-            response = "\n".join(response_lines[:4]) + "\n(truncated " + str(len(response_lines) - 4) + " more lines)"
+            response = "\n".join(response_lines[:4]) + "\n\n(truncated " + str(len(response_lines) - 4) + " more lines)"
         else:
             response = "\n".join(response_lines)
         # don't render tags
-        rich.print(" \[" + tool_name + "] ", end="")
-        rich.print(response, end="\n\n", flush=True)
+        response = textwrap.indent(response, " " * 2)
+        rich.print(response + "\n")
         
         self.in_content = False
+        self.num_content_chunks = 0
     
     def stream_start(self):
         """Called when streaming starts."""
@@ -75,6 +206,7 @@ class TerminalLogger:
         """Logs streaming content to the terminal."""
         print(content, end="", flush=True)
         self.in_content = True
+        self.num_content_chunks += 1
     
     def stream_end(self):
         """Called when streaming ends."""
@@ -94,12 +226,12 @@ class Agent:
             self.model_config = self.model_config or {}
             self.model_config['base_url'] = f"https://explorer.invariantlabs.ai/api/v1/gateway/{self.invariant_project}/" + endpoint_type
             self.model_config['headers'] = self.model_config.get('headers', {})
-            if not "INVARIANT_API_KEY" in os.environ:
+            if "INVARIANT_API_KEY" not in os.environ:
                 raise ValueError("INVARIANT_API_KEY environment variable is not set. Please set it to use Invariant.")
             self.model_config['extra_headers'] = {"Invariant-Authorization": f"Bearer {os.getenv('INVARIANT_API_KEY')}"}
 
         if tools:
-            assert all(callable(tool) for tool in tools), "All tools must be callable functions."
+            assert all(callable(tool) or isinstance(tool, MCP) for tool in tools), "All tools must be callable or instances of MCP."
             tools = [to_tool(tool) for tool in tools]
             self.tools = OrderedDict((tool['function']['name'], tool) for tool in tools)
         else:
@@ -107,36 +239,48 @@ class Agent:
 
     async def run(self, input: str, logger = TerminalLogger(), history_path: str | None = None):
         """Runs the agent with streaming output. Yields content chunks as they arrive."""
-        instance = AgentInstance(self, logger, history_path)
-        async for chunk in instance.run(input):
-            yield chunk
+        async with AgentInstance(self, logger, history_path) as instance:
+            async for chunk in instance.run(input):
+                yield chunk
     
     async def cli(self, persistent: bool = True):
-        user_input = sys.argv[1] if len(sys.argv) > 1 else input("> ")
+        # load history if persistent mode is enabled
+        history_path = os.path.join(os.path.expanduser("~"), ".agent-py") if persistent else None
+
+        # use terminal logger by default
+        logger = TerminalLogger()
+        
         console = rich.get_console()
-        while True:
-            try:
-                history_path = os.path.join(os.path.expanduser("~"), ".agent-py") if persistent else None
-                
-                # Use streaming mode
-                logger = TerminalLogger()
-                logger.stream_start()
-                
-                full_response = ""
-                async for chunk in self.run(user_input, logger=logger, history_path=history_path):
-                    logger.stream_content(chunk)
-                    full_response += chunk
-                
-                logger.stream_end()
-                
-                user_input = input("> ")
-                if user_input.lower() in ["exit", "quit"]:
+        
+        # create the agent instance
+        async with AgentInstance(self, logger=logger, history_path=history_path) as instance:
+            initial_user_input = sys.argv[1] if len(sys.argv) > 1 else None
+            # user interaction loop
+            while True:
+                try:        
+                    # get user input
+                    user_input = initial_user_input or await aioconsole.ainput("> ")
+                    initial_user_input = None  # reset after first input
+
+                    # check for special commands
+                    if user_input.lower() in ["exit", "quit"]:
+                        break
+                    if user_input == "clear":
+                        console.clear()
+                        continue
+
+                    logger.stream_start()
+
+                    # run and stream agent response
+                    full_response = ""
+                    async for chunk in instance.run(user_input):
+                        logger.stream_content(chunk)
+                        full_response += chunk
+                    
+                    # end the stream
+                    logger.stream_end()
+                except KeyboardInterrupt:
                     break
-                if user_input == "clear":
-                    console.clear()
-                    user_input = input("> ")
-            except KeyboardInterrupt:
-                break
 
 def load_history(history_path: str) -> List[dict]:
     """Loads the agent history from a file."""
@@ -156,14 +300,48 @@ class AgentInstance:
         self.history = [] if history_path is None else load_history(history_path)
         self.history_path = history_path
 
-    def tools(self):
+        self.ready = asyncio.Event()
+
+    async def tools(self):
         """Returns the tool signature, without the callable."""
         tool_signatures = []
         for name, tool in self.agent.tools.items():
-            tool_signature = { **tool }
-            del tool_signature['callable']  # Remove the callable from the signature
-            tool_signatures.append(tool_signature)
+            if tool['type'] == 'function':
+                tool_signature = { **tool }
+                del tool_signature['callable']  # Remove the callable from the signature
+                tool_signatures.append(tool_signature)
+            elif tool['type'] == 'mcp-server':
+                await tool['mcp'].ready.wait()  # ensure MCP connection is ready
+                
+                for tool in tool['mcp'].tools.values():
+                    tool_signature = { **tool }
+                    del tool_signature['mcp']
+                    tool_signatures.append(tool_signature)
+
         return tool_signatures
+
+    async def __aenter__(self):
+        # if already initialized, do nothing
+        if self.ready.is_set():
+            return
+        
+        # initialize MCP servers, if any
+        async def init_mcp(tool):
+            await asyncio.gather(
+                *(tool['mcp'].initialize() for tool in self.agent.tools.values() if tool['type'] == 'mcp-server')
+            )
+            self.ready.set()
+        
+        asyncio.create_task(init_mcp(self.agent))
+
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        # close MCP servers, if any
+        await asyncio.gather(
+            *(tool['mcp'].close() for tool in self.agent.tools.values() if tool['type'] == 'mcp-server')
+        )
+        self.ready.clear()
 
     async def append(self, msg: dict):
         """Appends a message to the agent history."""
@@ -174,7 +352,7 @@ class AgentInstance:
                 json.dump(self.history, f, indent=2)
 
     async def run_startup_tools(self):
-        startup_tools = [t for t in self.agent.tools.values() if t['callable'] in context.__all__]
+        startup_tools = [t for t in self.agent.tools.values() if t['type'] == 'function' and t['callable'] in context.__all__]
         startup_tool_results = await asyncio.gather(
             *(tool['callable']() for tool in startup_tools)
         )
@@ -189,6 +367,9 @@ class AgentInstance:
         """Runs this instance of the agent with streaming output."""
         # check for startup tools, and include 'user' type messages for them
         await self.run_startup_tools()
+
+        # ensure we are ready
+        await self.ready.wait()
         
         # Add system message with instructions if not already present
         if not self.history or self.history[0].get("role") != "system":
@@ -208,7 +389,7 @@ class AgentInstance:
             response = await acompletion(
                 model=self.agent.model,
                 messages=self.history,
-                tools=self.tools(),
+                tools=await self.tools(),
                 stream=True,
                 **self.agent.model_config
             )
@@ -283,15 +464,37 @@ class AgentInstance:
 
         async def make_response():
             """Creates the response/result for the tool call, i.e. tries to call the tool."""
-            if tool_name not in self.agent.tools:
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call['id'],
-                    "content": f"Tool '{tool_name}' not found."
-                }
-            
-            # get callable
-            tool_callable = self.agent.tools[tool_name]['callable']
+            nonlocal tool_name
+
+            # check for MCP match
+            if tool_name.startswith("mcp_"):
+                server_name = tool_name.split("_")[1]
+                server = self.agent.tools.get(server_name)
+                # check if the server has this tool
+                if server is None or server['type'] != 'mcp-server' or tool_name not in server['mcp'].tools:
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call['id'],
+                        "content": f"Tool '{tool_name}' not found in MCP server '{server_name}'."
+                    }
+                # calling it goes via the MCP server
+                async def tool_callable(**kwargs):
+                    """Calls the MCP tool."""
+                    nonlocal tool_name
+                    # call the MCP tool
+                    tool_name = tool_name[len("mcp_") + len(server_name) + 1:]
+                    return await server['mcp'].call_tool(tool_name, args)
+            else:
+                # check for regular tool match
+                if tool_name not in self.agent.tools:
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call['id'],
+                        "content": f"Tool '{tool_name}' not found."
+                    }
+                
+                # get callable
+                tool_callable = self.agent.tools[tool_name]['callable']
             
             # get and parse arguments
             args = tool_call['function']['arguments']
