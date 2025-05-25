@@ -60,7 +60,7 @@ async def amain():
     )
     await agent.cli(persistent=False)
 
-def main():
+if __name__ == "__main__":
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:
