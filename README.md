@@ -1,28 +1,23 @@
+# `agent.py`: minimal agent tool use scaffold
 
-# AgentPy
+`agent.py` is a one-file agent library designed to quickly build and experiment with agents, while keeping code complexity to a minimum.
 
-**Overview**: AgentPy is a one-file agent framework designed to quickly build and experiment with agents, while keeping code complexity to a minimum.
+**Features:**
 
-## Features
+- **CLI first**: Call and operate agents from the CLI for quick turn-around.
+- **Simple Implementation**: Implemented in <600 LOC in `src/agent.py`
+- **MCP Support**: Quickly add new tools by integration MCP servers.
 
-- **Easy to Use**: With a minimal setup, create powerful agents.
-- **Extensible**: Built with flexibility in mind; easily integrate with existing tools and libraries.
-- **Modern Tech Stack**: Utilizes leading libraries and Python features for optimal performance.
+**Quickstart:**
 
-## Installation
+To use `agent.py`, ensure you have [`uv`](https://docs.astral.sh/uv/) installed, then you can create and run your first agent like this:
 
-To use AgentPy, ensure you [`uv`](https://docs.astral.sh/uv/) installed, then you can create and run your first agent like this:
-
-First, ensure you have specified an OpenAI API key.
-```bash
-export OPENAI_API_KEY=...
-```
-
-Then, run the agent:
 ```bash
 uvx --from "git+https://github.com/lbeurerkellner/agent.py@main" \
     agentpy "agent with a calculator tool"
 ```
+
+*Requires an `OPENAI_API_KEY`
 
 This command will generate a new agent with calculator tools, put it in an appropriately-named file in your current directory and allows you to interact with it.
 
