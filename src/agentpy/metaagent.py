@@ -12,7 +12,7 @@ def main():
             f.write(snippet)
 
         print("[agent created at", name + ".py]")
-        print("\n", introduction)
+        print("\n" + introduction + "(type 'tools' for a list of tools, 'exit' to termiante the agent)")
 
         await run(name + ".py")
 
