@@ -10,10 +10,11 @@ dependencies = [
     "litellm>=1.71.1",
     "mcp>=1.9.1",
     "rich-cli>=1.8.0",
+    "wikipedia>=1.4.0",
 ]
 
 [project.scripts]
-agentpy = "agentpy.cli_agent:main"
+agentpy = "agentpy.metaagent:main"
 
 [build-system]
 requires = ["hatchling"]

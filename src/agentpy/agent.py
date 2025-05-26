@@ -5,7 +5,9 @@ import rich
 import tempfile
 import os
 import asyncio
+import subprocess
 import sys
+from functools import partial
 import json
 import types
 import textwrap
@@ -164,24 +166,24 @@ class TerminalLogger:
         self.in_content = False
         self.num_content_chunks = 0
 
-    def reasoning(self, message: str):
-        """Logs reasoning messages to the terminal."""
-        rich.print(f"[bold blue]Reasoning:[/bold blue] {message}")
-    
-    def tool_call(self, tool_name: str, args: str):
+    async def aprint(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, partial(rich.print, *args, **kwargs))
+
+    async def tool_call(self, tool_name: str, args: str):
         """Logs tool call messages to the terminal."""
         if self.in_content:
             if self.num_content_chunks == 0:
-                print("[no reasoning output]", end="", flush=True)
+                await self.aprint("[no reasoning output]", end="", flush=True)
             # if we are in content, we need to flush the current line
-            print("\n")
+            await self.aprint("\n")
         
-        rich.print("> " + tool_name + "(" + args + ")")
+        await self.aprint("> " + tool_name + "(" + args + ")")
         
         self.in_content = False
         self.num_content_chunks = 0
     
-    def tool_response(self, tool_name: str, response: str):
+    async def tool_response(self, tool_name: str, response: str):
         """Logs tool response messages to the terminal."""
         response = response if response else "[No content returned from tool]"
         # render at most 4 lines of the response
@@ -192,25 +194,25 @@ class TerminalLogger:
             response = "\n".join(response_lines)
         # don't render tags
         response = textwrap.indent(response, " " * 2)
-        rich.print(response + "\n")
+        await self.aprint(response + "\n")
         
         self.in_content = False
         self.num_content_chunks = 0
     
-    def stream_start(self):
+    async def stream_start(self):
         """Called when streaming starts."""
-        rich.print("● ", end="")
+        await self.aprint("● ", end="")
         self.in_content = True
     
-    def stream_content(self, content: str):
+    async def stream_content(self, content: str):
         """Logs streaming content to the terminal."""
-        print(content, end="", flush=True)
+        await self.aprint(content, end="", flush=True)
         self.in_content = True
         self.num_content_chunks += 1
     
-    def stream_end(self):
+    async def stream_end(self):
         """Called when streaming ends."""
-        print()  # New line after streaming completes
+        await self.aprint()  # New line after streaming completes
 
 class Agent:
     def __init__(self, instructions: str, model: str = "gpt-4o", tools: list[Callable] = None, model_config: dict = None, invariant_project_name: str = None):
@@ -265,20 +267,36 @@ class Agent:
                     # check for special commands
                     if user_input.lower() in ["exit", "quit"]:
                         break
-                    if user_input == "clear":
+                    elif user_input == "clear":
                         console.clear()
                         continue
+                    elif user_input == "tools":
+                        # list available tools
+                        tool_signatures = await instance.tools()
+                        if not tool_signatures:
+                            console.print("[bold red]No tools available.[/bold red]")
+                        else:
+                            console.print("[bold green]Available Tools:[/bold green]")
+                            for tool in tool_signatures:
+                                description = tool['function']['description'] or "No description available."
+                                # replace NLs 
+                                description = description.replace("\n", " ")
+                                # truncate long descriptions
+                                if len(description) > 100:
+                                    description = description[:100] + "..."
+                                console.print(f"- [bold]{tool['function']['name']}[/bold]: {description}")
+                        continue
 
-                    logger.stream_start()
+                    await logger.stream_start()
 
                     # run and stream agent response
                     full_response = ""
                     async for chunk in instance.run(user_input):
-                        logger.stream_content(chunk)
+                        await logger.stream_content(chunk)
                         full_response += chunk
                     
                     # end the stream
-                    logger.stream_end()
+                    await logger.stream_end()
                 except KeyboardInterrupt:
                     break
 
@@ -460,7 +478,7 @@ class AgentInstance:
         tool_name = tool_call['function']['name']
 
         # log the tool call
-        self.logger.tool_call(tool_name, tool_call['function']['arguments'])
+        await self.logger.tool_call(tool_name, tool_call['function']['arguments'])
 
         async def make_response():
             """Creates the response/result for the tool call, i.e. tries to call the tool."""
@@ -527,12 +545,12 @@ class AgentInstance:
         response = await make_response()
         
         # log the tool response
-        self.logger.tool_response(tool_name, response['content'])
+        await self.logger.tool_response(tool_name, response['content'])
 
         return response
 
 def context(func):
-    """Decorator to mark a function as a startup tool, to be included in the agent's context on startup."""
+    """Decorator to mark a function as a context component,     to be included in the agent's context on startup."""
     import inspect
     # ensure the function can be called without arguments
     if not inspect.isfunction(func) or len(inspect.signature(func).parameters) != 0:
