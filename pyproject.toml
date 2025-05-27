@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agentpy = "agentpy.metaagent:main"
+agentpy = "agentpy.agent:main"
 
 [build-system]
 requires = ["hatchling"]

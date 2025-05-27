@@ -48,7 +48,7 @@ async def amain():
         model="gpt-4o",
         tools=auto()
     )
-    await agent.cli(persistent=False)
+    await agent.cli(persistent=True)
 
 if __name__ == "__main__":
     try:

@@ -1,18 +1,16 @@
-from litellm import acompletion
 from typing import Callable, List
 import inspect
 import rich
 import tempfile
 import os
 import asyncio
-import subprocess
+import argparse
 import sys
 from functools import partial
 import json
 import types
 import textwrap
 import aioconsole
-import io
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -65,7 +63,8 @@ class MCP:
     def __init__(self, name: str, command: str, args: list[str], env: dict | None = None, timeout: int = 4, transport: str = "stdio"):
         if transport != "stdio":
             raise ValueError("Only 'stdio' transport is currently supported in this example.")
-        self.name = name
+        # replace everything except [A-z0-9_] with underscores
+        self.name = "".join(c if c.isalnum() else '' for c in name)
         self.server_params = StdioServerParameters(command=command, args=args, env=env)
         self.transport = transport
         self.timeout = timeout
@@ -194,8 +193,14 @@ class TerminalLogger:
             response = "\n".join(response_lines)
         # don't render tags
         response = textwrap.indent(response, " " * 2)
-        await self.aprint(response + "\n")
+        # render it
+        rendered = rich.text.Text.from_markup("[green]" + response + "[green]")
+        for i in range(0, len(rendered), 128):
+            chunk = rendered[i:i+128]
+            await self.aprint(chunk, end="", flush=True)
         
+        await self.aprint("\n")
+
         self.in_content = False
         self.num_content_chunks = 0
     
@@ -245,24 +250,69 @@ class Agent:
             async for chunk in instance.run(input):
                 yield chunk
     
+    @staticmethod
+    def tools_from_uris(args: List[str], result: OrderedDict | None = None) -> List[dict]:
+        if result is None: 
+            result = OrderedDict()
+        
+        for tool_uri in args:
+            if isinstance(tool_uri, str):
+                if tool_uri.startswith("npx:"): # assume it's an npx-based MCP server
+                    name = tool_uri[4:]
+                    result[name] = MCP(name, "npx", [name])
+                elif tool_uri.endswith(".json"):
+                    with open(tool_uri, 'r') as f:
+                        tool_data = json.load(f)
+                        servers = tool_data.get("mcpServers", {})
+                        assert isinstance(servers, dict), f"mcpServers in MCP configuration file '{tool_uri}' must be a dictionary."
+                        Agent.tools_from_uris([{"name": name, **kwargs} for (name, kwargs) in servers.items()], result)
+                else: # assume it's a local, uvx-based MCP server
+                    name = os.path.basename(tool_uri)
+                    result[name] = MCP(name, "uvx", [tool_uri])
+            elif isinstance(tool_uri, dict):
+                name = tool_uri.get("name")
+                result[name] = MCP(name, tool_uri.get("command", "uvx"), tool_uri.get("args", []), env=tool_uri.get("env"), timeout=tool_uri.get("timeout", 4), transport=tool_uri.get("type", "stdio"))
+            else:
+                assert False, f"Invalid tool URI: {tool_uri}. Must be a string or a dictionary."
+        
+        return [to_tool(tool) for name, tool in result.items()]
+
     async def cli(self, persistent: bool = True):
+        # print examples usage
+        parser = argparse.ArgumentParser(description="A CLI for tool-calling LLM agents.", formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=textwrap.dedent("""
+            Examples:
+                agentpy --with arxiv-mcp-server
+                agentpy --with npx:@playwright/mcp@latest
+                agentpy --with ~/.cursor/mcp.json
+            """))
+        parser.add_argument("initial_input", nargs='?', default=None, help="Initial user input to start the agent with.")
+        parser.add_argument("--with", action="append", default=[], help="Add a tool to the agent (e.g. --with your-mcp-server, --with npx:your-mcp-server --with mcp.json)", type=str, dest="with_")
+        parser.add_argument("--persistent", default=persistent, help="Enable persistent mode, which saves the agent history to a file in the user's home directory.", type=bool)
+        args = parser.parse_args()
+
         # load history if persistent mode is enabled
-        history_path = os.path.join(os.path.expanduser("~"), ".agent-py") if persistent else None
+        history_path = os.path.join(os.path.expanduser("~"), ".agent-py") if args.persistent else None
 
         # use terminal logger by default
         logger = TerminalLogger()
-        
         console = rich.get_console()
+
+        # parse tools
+        for tool in Agent.tools_from_uris(args.with_):
+            self.tools[tool['function']['name']] = tool
         
         # create the agent instance
         async with AgentInstance(self, logger=logger, history_path=history_path) as instance:
-            initial_user_input = sys.argv[1] if len(sys.argv) > 1 else None
+            initial_user_input = args.initial_input if args.initial_input else None
+            next_input_extra_context = ""
             # user interaction loop
             while True:
                 try:        
                     # get user input
-                    user_input = initial_user_input or await aioconsole.ainput("> ")
+                    user_input = next_input_extra_context + (initial_user_input or await aioconsole.ainput("> "))
                     initial_user_input = None  # reset after first input
+                    next_input_extra_context = ""  # reset extra context
 
                     # check for special commands
                     if user_input.lower() in ["exit", "quit"]:
@@ -270,11 +320,16 @@ class Agent:
                     elif user_input == "clear":
                         console.clear()
                         continue
+                    elif user_input == "help":
+                        helptext = parser.format_help()
+                        console.print(f"[bold blue]Agent CLI Help:[/bold blue]\n{helptext}")
+                        next_input_extra_context = helptext + "\nThis was shown to the user. Now they are asking:\n\n"
+                        continue
                     elif user_input == "tools":
                         # list available tools
                         tool_signatures = await instance.tools()
                         if not tool_signatures:
-                            console.print("[bold red]No tools available.[/bold red]")
+                            console.print("[bold red]No tools available. Run with --with, to enable tools.[/bold red]")
                         else:
                             console.print("[bold green]Available Tools:[/bold green]")
                             for tool in tool_signatures:
@@ -383,6 +438,8 @@ class AgentInstance:
     
     async def run(self, input: str):
         """Runs this instance of the agent with streaming output."""
+        from litellm import acompletion
+
         # check for startup tools, and include 'user' type messages for them
         await self.run_startup_tools()
 
@@ -588,3 +645,12 @@ def auto():
                 functions.append(obj)
 
     return functions
+
+
+def main():
+    agent = Agent(
+        instructions="You are a helpful assistant.",
+        model="gpt-4o"
+    )
+
+    asyncio.run(agent.cli(persistent=False))
