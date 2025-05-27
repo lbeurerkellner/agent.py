@@ -633,7 +633,7 @@ def auto():
 
     # Get the module where the caller is located
     module = inspect.getmodule(caller_frame)
-    if module is None:
+    if module is None: 
         return []
 
     # Traverse module attributes and collect locally defined functions
@@ -646,8 +646,9 @@ def auto():
 
     return functions
 
-
 def main():
+    if not os.getenv('OPENAI_API_KEY'):
+        raise ValueError("OPENAI_API_KEY environment variable is not set. Please set it to use the agent.")
     agent = Agent(
         instructions="You are a helpful assistant.",
         model="gpt-4o"
