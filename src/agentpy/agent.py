@@ -172,6 +172,7 @@ class TerminalLogger:
     async def tool_call(self, tool_name: str, args: str):
         """Logs tool call messages to the terminal."""
         if self.in_content:
+            self.in_content = False
             if self.num_content_chunks == 0:
                 await self.aprint("[no reasoning output]", end="", flush=True)
             # if we are in content, we need to flush the current line
@@ -179,7 +180,6 @@ class TerminalLogger:
         
         await self.aprint("> " + tool_name + "(" + args + ")")
         
-        self.in_content = False
         self.num_content_chunks = 0
     
     async def tool_response(self, tool_name: str, response: str):
@@ -191,6 +191,9 @@ class TerminalLogger:
             response = "\n".join(response_lines[:4]) + "\n\n(truncated " + str(len(response_lines) - 4) + " more lines)"
         else:
             response = "\n".join(response_lines)
+        # make sure total response is still not longer than 512
+        if len(response) > 512:
+            response = response[:512] + "\n\n(truncated to 512 characters)"
         # don't render tags
         response = textwrap.indent(response, " " * 2)
         # render it
@@ -237,6 +240,7 @@ class Agent:
                 raise ValueError("INVARIANT_API_KEY environment variable is not set. Please set it to use Invariant.")
             self.model_config['extra_headers'] = {"Invariant-Authorization": f"Bearer {os.getenv('INVARIANT_API_KEY')}"}
 
+        # create map of all tools
         if tools:
             assert all(callable(tool) or isinstance(tool, MCP) for tool in tools), "All tools must be callable or instances of MCP."
             tools = [to_tool(tool) for tool in tools]
