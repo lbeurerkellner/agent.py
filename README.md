@@ -13,7 +13,7 @@
 To use `agent.py`, ensure you have [`uv`](https://docs.astral.sh/uv/) installed, then you can create and run your first agent like this:
 
 ```bash
-uvx --from "git+https://github.com/lbeurerkellner/agent.py@main" agentpy
+uvx git+https://github.com/lbeurerkellner/agent.py@main
 ```
 
 *Requires an `OPENAI_API_KEY`
