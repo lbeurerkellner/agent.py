@@ -5,7 +5,7 @@
 **Features:**
 
 - **CLI first**: Call and operate agents from the CLI for quick turn-around.
-- **Simple Implementation**: Implemented in <600 LOC in `src/agent.py`
+- **Simple Implementation**: Implemented in <600 LOC in [`src/agent.py`](https://github.com/lbeurerkellner/agent.py/blob/main/src/agentpy/agent.py)
 - **MCP Support**: Quickly add new tools by integrating MCP servers (`--with arxiv-mcp-server`)
 
 **Quickstart:**
