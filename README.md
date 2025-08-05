@@ -6,7 +6,7 @@
 
 - **CLI first**: Call and operate agents from the CLI for quick turn-around.
 - **Simple Implementation**: Implemented in <600 LOC in `src/agent.py`
-- **MCP Support**: Quickly add new tools by integration MCP servers.
+- **MCP Support**: Quickly add new tools by integrating MCP servers.
 
 **Quickstart:**
 
