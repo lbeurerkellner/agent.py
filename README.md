@@ -74,7 +74,7 @@ You can also inspect the generated file (here `calculator-agent.py`) to review, 
 
 ## Use With Invariant
 
-To use agent.py with Invariant tools like Guardrails and Explorer, you can just run it as follows:
+To use agent.py with [Invariant tools](https://explorer.invariantlabs.ai/docs/) like Guardrails and Explorer, you can just run it as follows:
 
 ```
 export INVARIANT_API_KEY=... # get from explorer.invariantlabs.ai
